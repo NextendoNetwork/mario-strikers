@@ -1,0 +1,7 @@
+/mario-strikers
+*.exe
+*.linux
+*.bin
+cert.pem
+key.pem
+nextendo_secret.key
