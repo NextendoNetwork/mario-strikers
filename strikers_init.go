@@ -92,7 +92,7 @@ func strikersZeroStruct(s *nex.Settings, proto uint16, method, callID uint32) *n
 // — which the game treats as a fatal "network error". We instead LOG the request
 // bytes (to reverse each unknown method from its wire structure) and answer
 // empty-success so the game PROCEEDS and reveals its next call. Every common method
-// the base already implements still goes through it unchanged. measured-then-implement
+// the base already implements still goes through it unchanged. Capture-then-implement
 // loop, scoped to Strikers — no guessing baked in, just a probe that yields the bytes.
 func setupStrikersMatchmakeExt(endpoint *nex.Endpoint, base nex.RMCHandler) {
 	endpoint.Register(nex.ProtocolMatchmakeExtension, func(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {

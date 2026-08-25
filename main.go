@@ -2,7 +2,7 @@
 // secure) on the Nextendo NEX stack — our own closed-source NEX implementation,
 // with  the previous stack code. Forked from the SSBU server (both are Pia
 // NEX titles). Game server id 0x26CFAF00, access key "MAGNI5jG" (extracted from
-// the game binary), host the-game-host.
+// the game binary), host the game server hostname.
 //
 // Two NEX servers run in one process:
 //   - auth   (:443)   TicketGranting — LoginEx issues the Kerberos ticket.
@@ -25,9 +25,8 @@ import (
 )
 
 const (
-	// accessKey de Mario Strikers: Battle League, extraite du binaire du jeu (main.elf,
-	// config NEX @0xab0b04 : game server id 0x26CFAF00 puis les 8 octets 0x476A35494E47414D
-	// = "MAGNI5jG" en little-endian, layout NEX classique game_server_id + access_key).
+// L'identifiant de serveur de jeu et la cle d'acces sont ceux que le titre porte lui-meme :
+// ce sont des valeurs par titre, connues publiquement, pas des secrets.
 	accessKey      = "MAGNI5jG"
 	nexVersion     = 40000
 	securePID      = 2
@@ -147,10 +146,10 @@ func main() {
 	secureEndpoint.StartReaper()
 	go startDashboard(secureEndpoint, mm)
 
-	// When the auth is fronted by a TLS-passthrough proxy (the reverse proxy on the shared
+	// When the auth is fronted by a TLS-passthrough proxy (a reverse-proxy on the shared
 	// :443), enable PROXY protocol so the auth sees the console's REAL IP — otherwise
 	// the IP-based PID inheritance misses the direct secure connection and the session
-	// gets a placeholder PID. Direct deployments (a host) leave it off.
+	// gets a placeholder PID. Direct deployments (a direct host) leave it off.
 	proxyProto := os.Getenv("NEXTENDO_PROXY_PROTOCOL") == "1"
 	go func() {
 		fmt.Printf("[Strikers Auth] listening WSS :%d (proxyProto=%v, secure URL -> %s)\n", authPort, proxyProto, secureURL.String())
@@ -263,6 +262,7 @@ func resolveUser(username string, extraData []byte) (uint64, []byte, bool) {
 // rejected even though their HMAC is valid, without rotating the shared secret. Populated
 // per deployment.
 var revokedNexPayloads = map[string]bool{
+
 }
 // nextendoPIDFromToken validates a "nx2.<b64(pid.username.expiry)>.<b64(hmac)>"
 // token signed by the account service (HMAC-SHA256, "nex:" prefix).
@@ -284,7 +284,7 @@ func nextendoPIDFromToken(s string) (uint64, bool) {
 	if !hmac.Equal([]byte(want), []byte(parts[1])) {
 		return 0, false
 	}
-	if revokedNexPayloads[string(raw)] { // jeton fuité (release 1.6.5-win) — refusé malgré une signature valide
+	if revokedNexPayloads[string(raw)] { // jeton revoque : refuse malgre une signature valide
 		return 0, false
 	}
 	f := strings.SplitN(string(raw), ".", 3) // pid.username.expiry
