@@ -105,16 +105,26 @@ func main() {
 	secureEndpoint.SetSecureAccount(securePassword, securePID)
 
 	mm := nex.NewMatchmaking()
-	secureEndpoint.Register(nex.ProtocolSecureConnection, nex.SecureConnectionHandler())
+	// Same Pia generation as Golf and MPS: the joiner drops the host (2106-0502) unless the
+	// session URLs carry the endpoint Register reported.
+	mm.PreservePiaStationIdentity = true
+	mm.PublicStationFirst = false
+	mm.JoinRespExistingCount = true
+	mm.SessionPartPersists = true
+
+	scCfg := nex.SwitchPia519Config()
+	scCfg.PreservePiaStationIdentity = true
+	secureEndpoint.Register(nex.ProtocolSecureConnection, nex.SecureConnectionHandlerWithConfig(scCfg))
 	setupStrikersMatchmakeExt(secureEndpoint, mm.ExtensionHandler())
 	secureEndpoint.Register(nex.ProtocolMatchMaking, mm.MatchMakingHandler())
 	secureEndpoint.Register(nex.ProtocolMatchMakingExt, mm.MatchMakingExtHandler())
 	secureEndpoint.Register(nex.ProtocolNATTraversal, nex.NATTraversalHandler())
-	secureEndpoint.Register(nex.ProtocolRanking, nex.RankingHandler())
+	secureEndpoint.Register(nex.ProtocolRanking, strikersRankingHandler())
 	// Strikers: DataStore (0x73) + Utility (0x6E) are answered by a logging +
 	// empty-list handler (no measured bytes) so every init call is recorded and the
 	// game proceeds — the measured-then-implement method (see strikers_init.go).
 	setupStrikersInit(secureEndpoint)
+	setupStrikersReferee(secureEndpoint, mm)
 	// Subscriber (0x79) — presence / friend-status queries (0x79.14 GetFriendUserStatuses).
 	// Empty-list so the query succeeds cleanly (no friends online) instead of stalling.
 	secureEndpoint.Register(0x79, strikersInitHandler(0x79))
@@ -264,6 +274,7 @@ func resolveUser(username string, extraData []byte) (uint64, []byte, bool) {
 var revokedNexPayloads = map[string]bool{
 
 }
+
 // nextendoPIDFromToken validates a "nx2.<b64(pid.username.expiry)>.<b64(hmac)>"
 // token signed by the account service (HMAC-SHA256, "nex:" prefix).
 func nextendoPIDFromToken(s string) (uint64, bool) {

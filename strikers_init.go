@@ -41,25 +41,9 @@ func setupStrikersInit(endpoint *nex.Endpoint) {
 //	0x6D.62 STRUCT | 0x6D.65 STRUCT (identical type to 62) | 0x6D.70 list | 0x6D.90 list<u32>
 //	0x6D.91 scalar u32 | 0x6E.7 list | 0x6E.11 STRUCT
 //
-// TODO: fill the 62/65 struct with real fields (u64, u16, u32, list<u32>, qBuffer, DateTimes,
-// version-gated u32 run — decoder 0x1b930) so real matchmaking data can flow; zeros only parse.
-// Response kinds recovered from the game binary's NEX decoders (no measured). SINGLE-STRUCT
-// methods need a versioned-struct envelope; everything else (LIST / LIST<u32> / scalar) is
-// fine with an empty list (u32=0). Club family: 55/56/58/59 = create/update/join/get ONE club
-// (single struct, decoder 0x15970); 57/60/71/73 = find/list clubs (LIST<club>, decoder 0x1f534)
-// — a struct envelope there is read as a huge element count and blows up, so they must be lists.
-// 62/65 = online-init struct (0x1b930); 76 (0x4c) & 80 (0x50) = other single structs.
-var strikersStructMethods = map[uint32]bool{
-	62: true, 65: true, // online-init struct (decoder 0x1b930)
-	76: true, 80: true, // other single-struct methods
-} // 55 create + 56/58/59 update/join/get one club are handled specially (real club struct, not zero).
-// 73 is a LIST<club>, NOT here — it must return an empty list, not a struct envelope.
-//
-// 63 (0x3f) is a LIST, NOT a struct: answering it with a struct/zero-struct makes the client read
-// the [ver][len] header as a huge element count -> Core::BufferOverflow (0x8001000F). An empty list
-// (u32=0) decodes fine and the game reaches a LATER stage (NEXManagerState 20) where the real
-// roster blocker lives (Core::Unknown, module 121) — diagnosed via full service logging, not by
-// guessing 63's format. So 63 stays on the empty-list default below.
+// Club and player methods have persistent handlers in strikers_club.go.
+// These remaining season responses still use the existing placeholder implementation.
+var strikersStructMethods = map[uint32]bool{76: true, 80: true}
 
 // strikersBoolListMethods return "bool + list<u32>" (decoder 0x195f0), not a plain list —
 // a lone u32=0 is one byte short of [bool][u32 count] and overflows.
@@ -86,68 +70,40 @@ func strikersZeroStruct(s *nex.Settings, proto uint16, method, callID uint32) *n
 	return nex.NewRMCSuccess(s, proto, method, callID, body)
 }
 
-// setupStrikersMatchmakeExt wraps the base MatchmakeExtension (0x6D) handler.
-// Strikers uses game-specific methods above the common set (the base tops out at
-// method 53; Strikers calls e.g. 0x6d.62) that the base answers with notImplemented
-// — which the game treats as a fatal "network error". We instead LOG the request
-// bytes (to reverse each unknown method from its wire structure) and answer
-// empty-success so the game PROCEEDS and reveals its next call. Every common method
-// the base already implements still goes through it unchanged. Capture-then-implement
-// loop, scoped to Strikers — no guessing baked in, just a probe that yields the bytes.
+// Keep the Strikers-specific club protocol separate from common NEX matchmaking;
+// anything the base answers with notImplemented is logged and given empty-success.
 func setupStrikersMatchmakeExt(endpoint *nex.Endpoint, base nex.RMCHandler) {
 	endpoint.Register(nex.ProtocolMatchmakeExtension, func(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
-		// Methods 84-89 return "bool + list<u32>" (binary DDL, decoder 0x195f0): a lone u32=0
-		// is a byte short (needs [bool][u32 count] ≥ 5B) and overflows. Answer [false][empty].
+		switch req.Method {
+		case 55:
+			return strikersCreateClub(conn, req)
+		case 56, 58, 59:
+			return strikersGetClub(conn, req)
+		case 62, 65:
+			return strikersPlayerRequest(conn, req)
+		case 63:
+			return strikersClubPlayers(conn, req)
+		case 73:
+			return strikersListClubs(conn, req)
+		case 72:
+			return strikersClubCurrentStatus(conn, req)
+		case 83:
+			return strikersClubRoster(conn, req)
+		}
 		if strikersBoolListMethods[req.Method] {
 			out := nex.NewStreamOut(conn.Settings)
 			out.Bool(false)
 			out.U32(0)
-			fmt.Printf("[Strikers 0x6d] method %d call=%d -> bool+empty-list\n", req.Method, req.CallID)
 			return nex.NewRMCSuccess(conn.Settings, nex.ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 		}
-		// Method 55 (create club): return a REAL club (valid gid + owner) so the game accepts
-		// the creation instead of retrying in a loop on an all-zero club.
-		if req.Method == 55 {
-			return strikersCreateClub(conn, req)
-		}
-		// Methods 56/58/59 (update/join/get one club): return the caller's REAL club struct.
-		// A generic zero-struct here overflows the club decoder (0x15970) -> comm error on join.
-		if req.Method == 56 || req.Method == 58 || req.Method == 59 {
-			return strikersGetClub(conn, req)
-		}
-		// Method 73 (list clubs): return the caller's created clubs so the game sees the club
-		// it just made (an empty list here makes it conclude the club doesn't exist -> error).
-		if req.Method == 73 {
-			return strikersListClubs(conn, req)
-		}
-		// Method 83 (club member roster): return the owner as a member so the roster shows 1/20
-		// + a member card instead of 0/0. Pressing into that card makes the game fetch the
-		// member's profile (Mii/nickname) via nn::friends GetProfileList. That IPC was stubbed
-		// EMPTY in the stock emulator (ProfileImpl was a 0-byte struct) -> the game waited forever
-		// for a valid profile -> soft-lock, which is why 83 was disabled. The custom emulator
-		// build (mario strikers test/) now fills GetProfileList (accountId@0x00 + IsValid + the
-		// account's pseudo), so the member card renders. 83 and the emulator fix ship together.
-		if req.Method == 83 {
-			return strikersClubRoster(conn, req)
-		}
-		// Struct-returning methods (62, 65, ...): answer with a versioned-structure envelope
-		// [u8 version][u32 size][size zero bytes]. The client reads its fields as empty/default
-		// and stays IN BOUNDS; an empty list (4 bytes) is too short -> it reads past -> overflow.
-		// These are intercepted BEFORE the base handler (65 is handled by base as an empty list,
-		// which is exactly what overflows for Strikers).
 		if strikersStructMethods[req.Method] {
-			fmt.Printf("[Strikers 0x6d] method %d (0x%x) call=%d bodyLen=%d -> zero-struct [struct method]\n",
-				req.Method, req.Method, req.CallID, len(req.Body))
 			return strikersZeroStruct(conn.Settings, nex.ProtocolMatchmakeExtension, req.Method, req.CallID)
 		}
 		resp := base(conn, req)
 		if resp != nil && resp.IsError {
-			// Other unknown methods: empty NEX list (Samy's default unblock for list-returning
-			// game-specific methods with no active data — acnh custom_methods.go, no measured).
 			out := nex.NewStreamOut(conn.Settings)
 			out.U32(0)
-			fmt.Printf("[Strikers 0x6d] UNHANDLED method=%d (0x%x) call=%d bodyLen=%d hex=%x -> empty-list (count=0)\n",
-				req.Method, req.Method, req.CallID, len(req.Body), req.Body)
+			fmt.Printf("[Strikers 0x6d] UNHANDLED method=%d call=%d bodyLen=%d hex=%x -> empty-list\n", req.Method, req.CallID, len(req.Body), req.Body)
 			return nex.NewRMCSuccess(conn.Settings, nex.ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 		}
 		return resp
@@ -157,6 +113,9 @@ func setupStrikersMatchmakeExt(endpoint *nex.Endpoint, base nex.RMCHandler) {
 func strikersInitHandler(proto uint16) nex.RMCHandler {
 	return func(conn *nex.Connection, req *nex.RMCMessage) *nex.RMCMessage {
 		s := conn.Settings
+		if proto == 0x6E && req.Method == 10 {
+			return strikersClubCurrentStatus(conn, req)
+		}
 
 		// 0x73.8 = DataStore::GetMeta-style lookup; Nintendo answers NotFound and
 		// the client continues. Mirror it so Strikers doesn't treat it as fatal.
